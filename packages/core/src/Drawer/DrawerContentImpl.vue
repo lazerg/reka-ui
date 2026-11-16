@@ -35,11 +35,11 @@ import { computed, nextTick, onMounted, onUnmounted, watch } from 'vue'
 import { DismissableLayer } from '@/DismissableLayer'
 import { FocusScope } from '@/FocusScope'
 import { focus } from '@/FocusScope/utils'
-import { isHTMLElement, useForwardExpose } from '@/shared'
+import { isHTMLElement, useContentId, useContentMounted, useForwardExpose } from '@/shared'
 import { useDrawerSnapPoints } from './composables/useDrawerSnapPoints'
 import { useSwipeDismiss } from './composables/useSwipeDismiss'
 import { injectDrawerRootContext } from './DrawerRoot.vue'
-import { computeSwipeReleaseScalar, DRAWER_CSS_VARS, getDisplacement, registerDrawerCssProperties } from './utils'
+import { computeSwipeReleaseScalar, DRAWER_CSS_VARS, getDisplacement, onAnimationsFinished, registerDrawerCssProperties } from './utils'
 
 const props = withDefaults(defineProps<DrawerContentImplProps>(), {
   initialFocus: true,
@@ -49,6 +49,8 @@ const emits = defineEmits<DrawerContentImplEmits>()
 
 const rootContext = injectDrawerRootContext()
 const { forwardRef, currentElement } = useForwardExpose()
+useContentId(rootContext, currentElement)
+useContentMounted(rootContext, currentElement)
 
 registerDrawerCssProperties()
 
@@ -114,10 +116,26 @@ watch(() => rootContext.frontmostHeight.value, (h) => {
 // Report the frontmost height up the stack: this drawer's own height, or the
 // one its own nested drawer reported. Report 0 once it closes or unmounts, so
 // the parent falls back to its own height.
+//
+// The 0 is reported once, when this drawer stops being open. A sibling may
+// open while this one is still animating out, and a second 0 from here
+// would discard the height that sibling reported.
+let isReportingFrontmostHeight = false
+function releaseFrontmostHeight() {
+  if (!isReportingFrontmostHeight)
+    return
+  isReportingFrontmostHeight = false
+  rootContext.notifyParentFrontmostHeight?.(0)
+}
 watch(
   [() => rootContext.open.value, () => rootContext.frontmostHeight.value],
   ([isOpen, frontmostHeight]) => {
-    rootContext.notifyParentFrontmostHeight?.(isOpen ? frontmostHeight : 0)
+    if (!isOpen) {
+      releaseFrontmostHeight()
+      return
+    }
+    isReportingFrontmostHeight = true
+    rootContext.notifyParentFrontmostHeight?.(frontmostHeight)
   },
   { immediate: true },
 )
@@ -292,42 +310,30 @@ function onMountAutoFocus(event: Event) {
 }
 
 // --- update:openComplete wiring ---
-// Fire `update:openComplete` on the popup's own transitionend/animationend,
-// not on a microtask — consumers rely on this marker to know the enter/exit
-// transition has actually finished. We track the current listener so a rapid
-// open→close doesn't leak or double-fire, and guard with `event.target === el`
-// so child element transitions don't spuriously resolve the drawer lifecycle.
-let openCompleteCleanup: (() => void) | undefined
+// `update:openComplete` tells consumers the drawer has settled: every
+// animation and transition running on the popup has finished, or there was
+// none to wait for. A change of `open` drops the wait in progress, so an
+// opening that is interrupted by a close (or the reverse) reports nothing.
+let cancelOpenCompleteWait: (() => void) | undefined
+// Whether a close has started and has not been reported yet.
+let isClosePending = false
 
-function clearOpenCompleteListener() {
-  openCompleteCleanup?.()
-  openCompleteCleanup = undefined
+function completeOpenChange(isOpen: boolean) {
+  cancelOpenCompleteWait = undefined
+  isClosePending = false
+  rootContext.notifyOpenComplete(isOpen)
 }
 
-function listenForOpenComplete(isOpen: boolean) {
-  clearOpenCompleteListener()
+function waitForOpenComplete(isOpen: boolean) {
+  cancelOpenCompleteWait?.()
+  cancelOpenCompleteWait = undefined
+  isClosePending = !isOpen
   const el = currentElement.value
-  if (!el) {
-    // If there's no element (e.g. closed without ever mounting), fire
-    // synchronously so consumers still get the contract.
-    rootContext.notifyOpenComplete(isOpen)
-    return
-  }
-  const handler = (event: Event) => {
-    if (event.target !== el)
-      return
-    clearOpenCompleteListener()
-    rootContext.notifyOpenComplete(isOpen)
-  }
-  el.addEventListener('transitionend', handler)
-  el.addEventListener('animationend', handler)
-  openCompleteCleanup = () => {
-    el.removeEventListener('transitionend', handler)
-    el.removeEventListener('animationend', handler)
-  }
+  if (el)
+    cancelOpenCompleteWait = onAnimationsFinished(el, () => completeOpenChange(isOpen))
 }
 
-watch(() => rootContext.open.value, listenForOpenComplete)
+watch(() => rootContext.open.value, waitForOpenComplete)
 
 // Data attributes
 const dataAttributes = computed(() => {
@@ -363,9 +369,9 @@ onMounted(() => {
   rootContext.notifyParentHasNestedDrawer?.(true)
 
   // The content mounts already open, so the `open` watcher above never sees
-  // the opening and the enter animation has to be listened for here.
+  // the opening and the enter animation has to be waited for here.
   if (rootContext.open.value)
-    listenForOpenComplete(true)
+    waitForOpenComplete(true)
 
   // Initial frontmost height. Required on reopen, when the height is already
   // known from a previous open and the lazy watcher would never fire.
@@ -399,9 +405,13 @@ onUnmounted(() => {
     rootContext.contentElement.value = undefined
   registeredElement = undefined
   rootContext.notifyParentHasNestedDrawer?.(false)
-  rootContext.notifyParentFrontmostHeight?.(0)
+  releaseFrontmostHeight()
   unsubscribeNestedProgress?.()
-  clearOpenCompleteListener()
+  cancelOpenCompleteWait?.()
+  // The content left before its close was reported, which is what happens
+  // whenever it unmounts at the end of the exit animation: the close is complete.
+  if (isClosePending && !rootContext.open.value)
+    completeOpenChange(false)
 })
 
 // Dev warning for missing DrawerTitle

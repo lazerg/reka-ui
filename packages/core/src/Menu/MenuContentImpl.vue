@@ -16,6 +16,7 @@ import {
   createContext,
   getActiveElement,
   useArrowNavigation,
+  useContentMounted,
   useFocusGuards,
   useForwardExpose,
   useTypeahead,
@@ -137,6 +138,8 @@ const currentItemId = ref<string | null>(null)
 
 const rovingFocusGroupRef = ref<InstanceType<typeof RovingFocusGroup>>()
 const { forwardRef, currentElement: contentElement } = useForwardExpose()
+// Lets the trigger of this menu know that its content is in the document.
+useContentMounted(menuContext, contentElement)
 const { handleTypeaheadSearch } = useTypeahead()
 
 const highlightedElement = ref<HTMLElement>()
@@ -385,18 +388,23 @@ provideMenuContentContext({
           data-reka-menu-content
           :data-state="getOpenState(menuContext.open.value)"
           :dir="rootContext.dir.value"
+          :memo-dependencies="memoDependencies"
           :side="side"
           :side-offset="sideOffset"
+          :side-flip="sideFlip"
           :fallback-axis-side-direction="fallbackAxisSideDirection"
           :align="align"
           :align-offset="alignOffset"
+          :align-flip="alignFlip"
           :avoid-collisions="avoidCollisions"
           :collision-boundary="collisionBoundary"
           :collision-padding="collisionPadding"
           :arrow-padding="arrowPadding"
+          :hide-shifted-arrow="hideShiftedArrow"
           :prioritize-position="prioritizePosition"
           :position-strategy="positionStrategy"
           :update-position-strategy="updatePositionStrategy"
+          :disable-update-on-layout-shift="disableUpdateOnLayoutShift"
           :sticky="sticky"
           :hide-when-detached="hideWhenDetached"
           :reference="reference"
